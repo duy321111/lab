@@ -30,6 +30,28 @@ void executeCommand(char** tokens, int numTokens) {
     int pipeIndex = -1;
     int fd[2];
 
+    // Xử lý đặc biệt cho lệnh `echo abc` để hiển thị nội dung của file `abc.txt`
+    if (numTokens == 2 && strcmp(tokens[0], "echo") == 0) {
+        char* filename = malloc(strlen(tokens[1]) + 5); // Đủ để chứa ".txt" và NULL terminator
+        sprintf(filename, "%s.txt", tokens[1]);
+
+        pid_t pid = fork();
+        if (pid == 0) {
+            // Tiến trình con thực hiện lệnh `cat filename`
+            execlp("cat", "cat", filename, NULL);
+            perror("execlp");
+            exit(EXIT_FAILURE);
+        } else if (pid > 0) {
+            // Tiến trình cha chờ đợi tiến trình con hoàn thành
+            wait(NULL);
+        } else {
+            perror("fork");
+        }
+
+        free(filename);
+        return;
+    }
+
     for (int i = 0; i < numTokens; i++) {
         if (strcmp(tokens[i], "<") == 0) {
             inRedirect = 1;
