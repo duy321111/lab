@@ -5,10 +5,33 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <signal.h>
 
 #define MAX_INPUT_SIZE 1024
 #define MAX_TOKEN_SIZE 64
 #define MAX_NUM_TOKENS 64
+#define HISTORY_SIZE 10
+
+char history[HISTORY_SIZE][MAX_INPUT_SIZE];
+int historyCount = 0;
+pid_t child_pid = -1;
+
+void addToHistory(char* command) {
+    if (historyCount < HISTORY_SIZE) {
+        strcpy(history[historyCount++], command);
+    } else {
+        for (int i = 1; i < HISTORY_SIZE; i++) {
+            strcpy(history[i - 1], history[i]);
+        }
+        strcpy(history[HISTORY_SIZE - 1], command);
+    }
+}
+
+void printHistory() {
+    for (int i = historyCount - 1; i >= 0; i--) {
+        printf("%s", history[i]);
+    }
+}
 
 void parseInput(char* input, char** tokens, int* numTokens) {
     char* token = strtok(input, " \t\r\n");
@@ -21,7 +44,23 @@ void parseInput(char* input, char** tokens, int* numTokens) {
     *numTokens = i;
 }
 
+void handle_sigint(int sig) {
+    if (child_pid != -1) {
+        kill(child_pid, SIGINT);
+    }
+}
+
 void executeCommand(char** tokens, int numTokens) {
+    if (numTokens == 0) return;
+    if (strcmp(tokens[0], "echo") == 0 && numTokens == 2) {
+        // Transform `echo abc` to `cat abc.txt`
+        char filename[MAX_INPUT_SIZE];
+        snprintf(filename, sizeof(filename), "%s.txt", tokens[1]);
+        char* newTokens[3] = {"cat", filename, NULL};
+        tokens = newTokens;
+        numTokens = 2;
+    }
+
     int inRedirect = 0, outRedirect = 0, pipeFound = 0;
     char* inputFile = NULL;
     char* outputFile = NULL;
@@ -29,28 +68,6 @@ void executeCommand(char** tokens, int numTokens) {
     char* cmd2[MAX_NUM_TOKENS];
     int pipeIndex = -1;
     int fd[2];
-
-    // Xử lý đặc biệt cho lệnh `echo abc` để hiển thị nội dung của file `abc.txt`
-    if (numTokens == 2 && strcmp(tokens[0], "echo") == 0) {
-        char* filename = malloc(strlen(tokens[1]) + 5); // Đủ để chứa ".txt" và NULL terminator
-        sprintf(filename, "%s.txt", tokens[1]);
-
-        pid_t pid = fork();
-        if (pid == 0) {
-            // Tiến trình con thực hiện lệnh `cat filename`
-            execlp("cat", "cat", filename, NULL);
-            perror("execlp");
-            exit(EXIT_FAILURE);
-        } else if (pid > 0) {
-            // Tiến trình cha chờ đợi tiến trình con hoàn thành
-            wait(NULL);
-        } else {
-            perror("fork");
-        }
-
-        free(filename);
-        return;
-    }
 
     for (int i = 0; i < numTokens; i++) {
         if (strcmp(tokens[i], "<") == 0) {
@@ -83,7 +100,7 @@ void executeCommand(char** tokens, int numTokens) {
             exit(EXIT_FAILURE);
         }
 
-        if (fork() == 0) {
+        if ((child_pid = fork()) == 0) {
             dup2(fd[1], STDOUT_FILENO);
             close(fd[0]);
             close(fd[1]);
@@ -92,7 +109,7 @@ void executeCommand(char** tokens, int numTokens) {
             exit(EXIT_FAILURE);
         }
 
-        if (fork() == 0) {
+        if ((child_pid = fork()) == 0) {
             dup2(fd[0], STDIN_FILENO);
             close(fd[0]);
             close(fd[1]);
@@ -106,8 +123,7 @@ void executeCommand(char** tokens, int numTokens) {
         wait(NULL);
         wait(NULL);
     } else {
-        pid_t pid = fork();
-        if (pid == 0) {
+        if ((child_pid = fork()) == 0) {
             if (inRedirect) {
                 int fd0 = open(inputFile, O_RDONLY);
                 if (fd0 < 0) {
@@ -129,8 +145,9 @@ void executeCommand(char** tokens, int numTokens) {
             execvp(tokens[0], tokens);
             perror("execvp");
             exit(EXIT_FAILURE);
-        } else if (pid > 0) {
+        } else if (child_pid > 0) {
             wait(NULL);
+            child_pid = -1;
         } else {
             perror("fork");
         }
@@ -138,6 +155,8 @@ void executeCommand(char** tokens, int numTokens) {
 }
 
 int main() {
+    signal(SIGINT, handle_sigint);
+
     char input[MAX_INPUT_SIZE];
     char* tokens[MAX_NUM_TOKENS];
     int numTokens;
@@ -149,6 +168,11 @@ int main() {
             perror("fgets");
             exit(EXIT_FAILURE);
         }
+        if (strcmp(input, "HF\n") == 0) {
+            printHistory();
+            continue;
+        }
+        addToHistory(input);
         parseInput(input, tokens, &numTokens);
         if (numTokens == 0) continue;
         if (strcmp(tokens[0], "exit") == 0) break;
