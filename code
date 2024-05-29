@@ -1,51 +1,136 @@
-void exec_cmd(char *command)
-{
-    argsCount = 0;
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 
-    // Xử lý chuỗi nhập vào
-    char *token = strtok(command, " "); // Tách chuỗi ký tự đầu tiên ra khi có dấu cách và lưu vào token
-    while (token != NULL)
-    {
-        args[argsCount++] = token; // args[i] bằng một chuỗi ký tự ngăn bởi dấu cách hay nói cách khác là một từ; có tối đa 41 từ trên một dòng
-        token = strtok(NULL, " "); // Tiếp tục tách chuỗi đến khi token là ký tự rỗng khi bị cắt bởi dấu cách
+#define MAX_INPUT_SIZE 1024
+#define MAX_TOKEN_SIZE 64
+#define MAX_NUM_TOKENS 64
+
+void parseInput(char* input, char** tokens, int* numTokens) {
+    char* token = strtok(input, " \t\r\n");
+    int i = 0;
+    while (token != NULL) {
+        tokens[i++] = token;
+        token = strtok(NULL, " \t\r\n");
     }
-    args[argsCount] = NULL; // Từ cuối cùng sẽ là kết thúc chuỗi từ
+    tokens[i] = NULL;
+    *numTokens = i;
+}
 
-    // Nếu lệnh là chuyển hướng đầu vào ra
-    int input_fd, output_fd;
-    int redirect_input = 0, redirect_output = 0;
+void executeCommand(char** tokens, int numTokens) {
+    int inRedirect = 0, outRedirect = 0, pipeFound = 0;
+    char* inputFile = NULL;
+    char* outputFile = NULL;
+    char* cmd1[MAX_NUM_TOKENS];
+    char* cmd2[MAX_NUM_TOKENS];
+    int pipeIndex = -1;
+    int fd[2];
 
-    for (int j = 0; j < argsCount; j++)
-    {
-        // Dấu hiệu chuyển hướng đầu ra của một tệp
-        if (strcmp(args[j], ">") == 0)
-        {
-            args[j] = NULL;      // Đánh dấu vị trí chuyển hướng là NULL
-            redirect_output = 1; // Cờ chuyển hướng đầu ra
-
-            if (args[j + 1] == NULL)
-            { // Nơi đầu ra được chuyển hướng vào là NULL nghĩa là không có file output.
-                printf("Missing output file\n");
-                exit(EXIT_FAILURE); // Sửa thành EXIT_FAILURE
-            }
-            else
-            {
-                output_fd = open(args[j + 1], O_WRONLY | O_CREAT | O_TRUNC, 0644);
-                if (output_fd < 0)
-                {
-                    perror("Error opening output file");
-                    exit(EXIT_FAILURE);
-                }
-                dup2(output_fd, STDOUT_FILENO); // Chuyển đầu ra sang file
-                close(output_fd);
-            }
+    for (int i = 0; i < numTokens; i++) {
+        if (strcmp(tokens[i], "<") == 0) {
+            inRedirect = 1;
+            inputFile = tokens[i + 1];
+            tokens[i] = NULL;
+        } else if (strcmp(tokens[i], ">") == 0) {
+            outRedirect = 1;
+            outputFile = tokens[i + 1];
+            tokens[i] = NULL;
+        } else if (strcmp(tokens[i], "|") == 0) {
+            pipeFound = 1;
+            pipeIndex = i;
+            tokens[i] = NULL;
         }
     }
 
-    // Thực thi lệnh
-    if (execvp(args[0], args) == -1)
-    {
-        perror("Error executing command");
-        exit(EXIT_FAILURE);
+    if (pipeFound) {
+        for (int i = 0; i < pipeIndex; i++) {
+            cmd1[i] = tokens[i];
+        }
+        cmd1[pipeIndex] = NULL;
+        for (int i = pipeIndex + 1, j = 0; i < numTokens; i++, j++) {
+            cmd2[j] = tokens[i];
+        }
+        cmd2[numTokens - pipeIndex - 1] = NULL;
+
+        if (pipe(fd) == -1) {
+            perror("pipe");
+            exit(EXIT_FAILURE);
+        }
+
+        if (fork() == 0) {
+            dup2(fd[1], STDOUT_FILENO);
+            close(fd[0]);
+            close(fd[1]);
+            execvp(cmd1[0], cmd1);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        }
+
+        if (fork() == 0) {
+            dup2(fd[0], STDIN_FILENO);
+            close(fd[0]);
+            close(fd[1]);
+            execvp(cmd2[0], cmd2);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        }
+
+        close(fd[0]);
+        close(fd[1]);
+        wait(NULL);
+        wait(NULL);
+    } else {
+        pid_t pid = fork();
+        if (pid == 0) {
+            if (inRedirect) {
+                int fd0 = open(inputFile, O_RDONLY);
+                if (fd0 < 0) {
+                    perror("open");
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd0, STDIN_FILENO);
+                close(fd0);
+            }
+            if (outRedirect) {
+                int fd1 = open(outputFile, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+                if (fd1 < 0) {
+                    perror("open");
+                    exit(EXIT_FAILURE);
+                }
+                dup2(fd1, STDOUT_FILENO);
+                close(fd1);
+            }
+            execvp(tokens[0], tokens);
+            perror("execvp");
+            exit(EXIT_FAILURE);
+        } else if (pid > 0) {
+            wait(NULL);
+        } else {
+            perror("fork");
+        }
     }
+}
+
+int main() {
+    char input[MAX_INPUT_SIZE];
+    char* tokens[MAX_NUM_TOKENS];
+    int numTokens;
+
+    while (1) {
+        printf("it007sh> ");
+        if (fgets(input, sizeof(input), stdin) == NULL) {
+            perror("fgets");
+            exit(EXIT_FAILURE);
+        }
+        parseInput(input, tokens, &numTokens);
+        if (numTokens == 0) continue;
+        if (strcmp(tokens[0], "exit") == 0) break;
+        executeCommand(tokens, numTokens);
+    }
+
+    return 0;
 }
